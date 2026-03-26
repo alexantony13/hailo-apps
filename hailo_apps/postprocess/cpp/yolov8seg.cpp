@@ -41,7 +41,6 @@ namespace
 {
 constexpr int REGRESSION_LENGTH = 15;
 constexpr int BOX_CHANNELS = 4 * (REGRESSION_LENGTH + 1);
-constexpr int SCORE_CHANNELS = 80;
 constexpr int MASK_COEFFICIENTS = 32;
 
 struct ScaleTensors
@@ -86,7 +85,22 @@ int stride_from_tensor(const HailoTensorPtr &tensor, int input_width)
     return input_width / static_cast<int>(tensor->height());
 }
 
-std::vector<ScaleTensors> collect_scale_tensors(const std::vector<HailoTensorPtr> &tensors, int input_width)
+/**
+ * @brief Collect scale tensors using the channel-count heuristic.
+ *
+ * Each output tensor is classified by its channel count:
+ *   - BOX_CHANNELS (64)        → box regression tensor
+ *   - num_classes               → class-score tensor  (was hardcoded to 80)
+ *   - MASK_COEFFICIENTS (32)   → mask-coefficient tensor (proto excluded by stride==4)
+ *
+ * @param tensors     All tensors from the ROI
+ * @param input_width Network input width (used to compute stride)
+ * @param num_classes Number of detection classes in the model
+ */
+std::vector<ScaleTensors> collect_scale_tensors(
+    const std::vector<HailoTensorPtr> &tensors,
+    int input_width,
+    int num_classes)
 {
     std::map<int, ScaleTensors> grouped;
 
@@ -106,7 +120,7 @@ std::vector<ScaleTensors> collect_scale_tensors(const std::vector<HailoTensorPtr
         {
             group.boxes = tensor;
         }
-        else if (channels == SCORE_CHANNELS)
+        else if (channels == num_classes)
         {
             group.scores = tensor;
         }
@@ -123,6 +137,55 @@ std::vector<ScaleTensors> collect_scale_tensors(const std::vector<HailoTensorPtr
         {
             scales.push_back(group);
         }
+    }
+
+    std::sort(scales.begin(), scales.end(), [](const ScaleTensors &a, const ScaleTensors &b) {
+        return a.stride < b.stride;
+    });
+    return scales;
+}
+
+/**
+ * @brief Collect scale tensors using explicit tensor names from the JSON config.
+ *
+ * This is fully robust: it does not rely on channel counts at all.
+ * The three name lists (boxes, scores, masks) must be the same length.
+ * Strides are derived at runtime from the boxes tensor shape.
+ *
+ * @param tensors_by_name  Map of tensor name → tensor pointer (from roi->get_tensors_by_name())
+ * @param names            Explicit output name struct from params
+ * @param input_width      Network input width (used to compute stride from tensor shape)
+ */
+std::vector<ScaleTensors> collect_scale_tensors_by_name(
+    const std::map<std::string, HailoTensorPtr> &tensors_by_name,
+    const Yolov8segOutputsName &names,
+    int input_width)
+{
+    std::vector<ScaleTensors> scales;
+
+    for (size_t i = 0; i < names.boxes.size(); i++)
+    {
+        auto box_it   = tensors_by_name.find(names.boxes[i]);
+        auto score_it = tensors_by_name.find(names.scores[i]);
+        auto mask_it  = tensors_by_name.find(names.masks[i]);
+
+        if (box_it == tensors_by_name.end() ||
+            score_it == tensors_by_name.end() ||
+            mask_it == tensors_by_name.end())
+        {
+            std::cerr << "Warning: one or more tensors not found for scale " << i
+                      << " (boxes='" << names.boxes[i]
+                      << "', scores='" << names.scores[i]
+                      << "', masks='" << names.masks[i] << "')" << std::endl;
+            continue;
+        }
+
+        ScaleTensors s;
+        s.boxes  = box_it->second;
+        s.scores = score_it->second;
+        s.masks  = mask_it->second;
+        s.stride = stride_from_tensor(s.boxes, input_width);
+        scales.push_back(s);
     }
 
     std::sort(scales.begin(), scales.end(), [](const ScaleTensors &a, const ScaleTensors &b) {
@@ -149,6 +212,22 @@ HailoTensorPtr find_proto_tensor(const std::vector<HailoTensorPtr> &tensors, int
     }
 
     return nullptr;
+}
+
+/**
+ * @brief Find the prototype tensor by its explicit name from the JSON config.
+ */
+HailoTensorPtr find_proto_tensor_by_name(
+    const std::map<std::string, HailoTensorPtr> &tensors_by_name,
+    const std::string &proto_name)
+{
+    auto it = tensors_by_name.find(proto_name);
+    if (it == tensors_by_name.end())
+    {
+        std::cerr << "Warning: proto tensor '" << proto_name << "' not found" << std::endl;
+        return nullptr;
+    }
+    return it->second;
 }
 
 void fill_dequantized_box(
@@ -189,6 +268,7 @@ std::vector<HailoDetection> decode_scale(
         masks_ptr->quant_info().qp_zp);
 
     int num_proposals = box_tensor.shape(0) * box_tensor.shape(1);
+    int num_classes = static_cast<int>(scores_ptr->shape()[2]);
     auto quantized_boxes = xt::reshape_view(box_tensor, {num_proposals, 4, REGRESSION_LENGTH + 1});
     auto masks = xt::reshape_view(mask_tensor, {num_proposals, MASK_COEFFICIENTS});
     auto regression_distance = xt::reshape_view(xt::arange(0, REGRESSION_LENGTH + 1), {1, 1, REGRESSION_LENGTH + 1});
@@ -198,10 +278,10 @@ std::vector<HailoDetection> decode_scale(
 
     for (int proposal_index = 0; proposal_index < num_proposals; proposal_index++)
     {
-        auto score_offset = proposal_index * SCORE_CHANNELS;
+        auto score_offset = proposal_index * num_classes;
         int class_index = 0;
         float confidence = score_tensor.data()[score_offset];
-        for (int c = 1; c < SCORE_CHANNELS; c++)
+        for (int c = 1; c < num_classes; c++)
         {
             float score = score_tensor.data()[score_offset + c];
             if (score > confidence)
@@ -300,12 +380,11 @@ std::vector<HailoDetection> decode_scale(
 }
 
 std::vector<HailoDetection> yolov8seg_post(
-    const std::vector<HailoTensorPtr> &tensors,
+    const std::vector<ScaleTensors> &scales,
     const std::vector<int> &network_dims,
     float iou_threshold,
     float score_threshold)
 {
-    auto scales = collect_scale_tensors(tensors, network_dims[0]);
     if (scales.empty())
     {
         return {};
@@ -337,17 +416,29 @@ Yolov8segParams *init(const std::string config_path, const std::string function_
     (void)function_name;
     if (!fs::exists(config_path))
     {
+        std::cerr << "Config file '" << config_path << "' not found, using default parameters" << std::endl;
         return params;
     }
 
     char config_buffer[4096];
+    // Schema covers all supported fields; outputs_name sub-object is optional.
     const char *json_schema = R""""({
       "$schema": "http://json-schema.org/draft-07/schema#",
       "type": "object",
       "properties": {
-        "iou_threshold": {"type": "number"},
+        "iou_threshold":   {"type": "number"},
         "score_threshold": {"type": "number"},
-        "input_shape": {"type": "array", "items": {"type": "number"}}
+        "num_classes":     {"type": "integer", "minimum": 1},
+        "input_shape":     {"type": "array", "items": {"type": "number"}},
+        "outputs_name": {
+          "type": "object",
+          "properties": {
+            "proto":  {"type": "string"},
+            "boxes":  {"type": "array", "items": {"type": "string"}},
+            "scores": {"type": "array", "items": {"type": "string"}},
+            "masks":  {"type": "array", "items": {"type": "string"}}
+          }
+        }
       }
     })"""";
 
@@ -361,6 +452,7 @@ Yolov8segParams *init(const std::string config_path, const std::string function_
     {
         rapidjson::Document doc;
         doc.ParseStream(stream);
+
         if (doc.HasMember("iou_threshold"))
         {
             params->iou_threshold = doc["iou_threshold"].GetFloat();
@@ -369,6 +461,10 @@ Yolov8segParams *init(const std::string config_path, const std::string function_
         {
             params->score_threshold = doc["score_threshold"].GetFloat();
         }
+        if (doc.HasMember("num_classes"))
+        {
+            params->num_classes = doc["num_classes"].GetInt();
+        }
         if (doc.HasMember("input_shape"))
         {
             auto config_input_shape = doc["input_shape"].GetArray();
@@ -376,6 +472,37 @@ Yolov8segParams *init(const std::string config_path, const std::string function_
             for (uint j = 0; j < config_input_shape.Size(); j++)
             {
                 params->input_shape.push_back(config_input_shape[j].GetInt());
+            }
+        }
+        if (doc.HasMember("outputs_name"))
+        {
+            const auto &on = doc["outputs_name"];
+            if (on.HasMember("proto"))
+            {
+                params->outputs_name.proto = on["proto"].GetString();
+            }
+
+            auto parse_string_array = [](const rapidjson::Value &arr) {
+                std::vector<std::string> result;
+                for (uint i = 0; i < arr.Size(); i++)
+                {
+                    result.push_back(arr[i].GetString());
+                }
+                return result;
+            };
+
+            if (on.HasMember("boxes"))
+                params->outputs_name.boxes  = parse_string_array(on["boxes"]);
+            if (on.HasMember("scores"))
+                params->outputs_name.scores = parse_string_array(on["scores"]);
+            if (on.HasMember("masks"))
+                params->outputs_name.masks  = parse_string_array(on["masks"]);
+
+            if (!params->outputs_name.is_set())
+            {
+                std::cerr << "Warning: 'outputs_name' in config is incomplete; "
+                             "falling back to channel-count heuristic" << std::endl;
+                params->outputs_name = Yolov8segOutputsName{};
             }
         }
     }
@@ -398,13 +525,41 @@ void filter(HailoROIPtr roi, void *params_void_ptr)
 
     std::vector<int> network_dims = {params->input_shape[0], params->input_shape[1]};
     auto tensors = roi->get_tensors();
-    auto proto_tensor_ptr = find_proto_tensor(tensors, network_dims[0]);
+
+    std::vector<ScaleTensors> scales;
+    HailoTensorPtr proto_tensor_ptr;
+
+    if (params->outputs_name.is_set())
+    {
+        // ── Name-based lookup ─────────────────────────────────────────────────
+        // Fully robust: ignores channel counts, works for any num_classes and
+        // any model naming convention.
+        auto tensors_by_name = roi->get_tensors_by_name();
+        scales = collect_scale_tensors_by_name(tensors_by_name, params->outputs_name, network_dims[0]);
+        proto_tensor_ptr = find_proto_tensor_by_name(tensors_by_name, params->outputs_name.proto);
+    }
+    else
+    {
+        // ── Channel-count heuristic ───────────────────────────────────────────
+        // Uses params->num_classes (default 80, JSON-overridable) so that
+        // retrained models with a different class count still work correctly
+        // without requiring explicit tensor names.
+        scales = collect_scale_tensors(tensors, network_dims[0], params->num_classes);
+        proto_tensor_ptr = find_proto_tensor(tensors, network_dims[0]);
+    }
+
+    if (scales.empty())
+    {
+        std::cerr << "Warning: no valid scale tensors found; check 'num_classes' or 'outputs_name' in config" << std::endl;
+        return;
+    }
     if (proto_tensor_ptr == nullptr)
     {
+        std::cerr << "Warning: prototype tensor not found" << std::endl;
         return;
     }
 
-    auto detections = yolov8seg_post(tensors, network_dims, params->iou_threshold, params->score_threshold);
+    auto detections = yolov8seg_post(scales, network_dims, params->iou_threshold, params->score_threshold);
     auto proto_tensor = common::dequantize(
         common::get_xtensor(proto_tensor_ptr),
         proto_tensor_ptr->quant_info().qp_scale,
