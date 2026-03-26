@@ -192,18 +192,6 @@ json:
     source: s3
     tag:
       - instance_segmentation
-  - name: yolov8m_seg.json
-    source: s3
-    tag:
-      - instance_segmentation
-  - name: yolov8n_seg.json
-    source: s3
-    tag:
-      - instance_segmentation
-  - name: yolov8s_seg.json
-    source: s3
-    tag:
-      - instance_segmentation
   - name: visdrone.json
     source: s3
     tag:
