@@ -24,6 +24,7 @@
 #include <cmath>
 #include <filesystem>
 #include <map>
+#include <cstdio>
 #include <stdexcept>
 #include <tuple>
 #include <vector>
@@ -159,7 +160,8 @@ std::vector<ScaleTensors> collect_scale_tensors(
 std::vector<ScaleTensors> collect_scale_tensors_by_name(
     const std::map<std::string, HailoTensorPtr> &tensors_by_name,
     const Yolov8segOutputsName &names,
-    int input_width)
+    int input_width,
+    int num_classes)
 {
     std::vector<ScaleTensors> scales;
 
@@ -184,6 +186,31 @@ std::vector<ScaleTensors> collect_scale_tensors_by_name(
         s.boxes  = box_it->second;
         s.scores = score_it->second;
         s.masks  = mask_it->second;
+
+        if (s.boxes->shape().size() != 3 ||
+            s.scores->shape().size() != 3 ||
+            s.masks->shape().size() != 3)
+        {
+            std::cerr << "Warning: invalid tensor rank for scale " << i
+                      << " (expected rank-3 for boxes/scores/masks)" << std::endl;
+            continue;
+        }
+
+        const int box_channels = static_cast<int>(s.boxes->shape()[2]);
+        const int score_channels = static_cast<int>(s.scores->shape()[2]);
+        const int mask_channels = static_cast<int>(s.masks->shape()[2]);
+        if (box_channels != BOX_CHANNELS || mask_channels != MASK_COEFFICIENTS || score_channels != num_classes)
+        {
+            std::cerr << "Warning: unexpected channels for scale " << i
+                      << " (boxes=" << box_channels
+                      << ", scores=" << score_channels
+                      << ", masks=" << mask_channels
+                      << ", expected boxes=" << BOX_CHANNELS
+                      << ", scores=" << num_classes
+                      << ", masks=" << MASK_COEFFICIENTS << ")" << std::endl;
+            continue;
+        }
+
         s.stride = stride_from_tensor(s.boxes, input_width);
         scales.push_back(s);
     }
@@ -266,6 +293,32 @@ std::vector<HailoDetection> decode_scale(
         common::get_xtensor(masks_ptr),
         masks_ptr->quant_info().qp_scale,
         masks_ptr->quant_info().qp_zp);
+
+    if (box_tensor.shape().size() != 3 || score_tensor.shape().size() != 3 || mask_tensor.shape().size() != 3)
+    {
+        std::cerr << "Warning: invalid tensor rank in decode_scale (expected rank-3)" << std::endl;
+        return {};
+    }
+
+    int num_proposals_boxes = static_cast<int>(box_tensor.shape(0) * box_tensor.shape(1));
+    int num_proposals_scores = static_cast<int>(score_tensor.shape(0) * score_tensor.shape(1));
+    int num_proposals_masks = static_cast<int>(mask_tensor.shape(0) * mask_tensor.shape(1));
+    if (num_proposals_boxes <= 0 || num_proposals_scores <= 0 || num_proposals_masks <= 0 ||
+        num_proposals_boxes != num_proposals_scores ||
+        num_proposals_boxes != num_proposals_masks)
+    {
+        std::cerr << "Warning: proposal-count mismatch in decode_scale "
+                  << "(boxes=" << num_proposals_boxes
+                  << ", scores=" << num_proposals_scores
+                  << ", masks=" << num_proposals_masks << ")" << std::endl;
+        return {};
+    }
+
+    if (score_tensor.shape(2) == 0)
+    {
+        std::cerr << "Warning: score tensor has zero classes in decode_scale" << std::endl;
+        return {};
+    }
 
     int num_proposals = box_tensor.shape(0) * box_tensor.shape(1);
     int num_classes = static_cast<int>(scores_ptr->shape()[2]);
@@ -363,11 +416,16 @@ std::vector<HailoDetection> decode_scale(
         HailoBBox bbox(xmin, ymin, width, height);
 
         int hailo_class_index = class_index + 1;
-        if (hailo_class_index < 0 || hailo_class_index >= static_cast<int>(common::coco_eighty.size()))
+        std::string label;
+        if (hailo_class_index >= 0 && hailo_class_index < static_cast<int>(common::coco_eighty.size()))
         {
-            continue;
+            label = common::coco_eighty[hailo_class_index];
         }
-        HailoDetection detection(bbox, hailo_class_index, common::coco_eighty[hailo_class_index], confidence);
+        else
+        {
+            label = "class_" + std::to_string(class_index);
+        }
+        HailoDetection detection(bbox, hailo_class_index, label, confidence);
 
         auto mask_coefficients = xt::eval(xt::view(masks, proposal_index, xt::all()));
         std::vector<float> mask_data(mask_coefficients.size());
@@ -425,18 +483,39 @@ Yolov8segParams *init(const std::string config_path, const std::string function_
     const char *json_schema = R""""({
       "$schema": "http://json-schema.org/draft-07/schema#",
       "type": "object",
-      "properties": {
-        "iou_threshold":   {"type": "number"},
-        "score_threshold": {"type": "number"},
+        "properties": {
+        "iou_threshold":   {"type": "number", "minimum": 0, "maximum": 1},
+        "score_threshold": {"type": "number", "minimum": 0, "maximum": 1},
         "num_classes":     {"type": "integer", "minimum": 1},
-        "input_shape":     {"type": "array", "items": {"type": "number"}},
+        "input_shape":     {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 1},
+          "minItems": 2,
+          "maxItems": 2
+        },
         "outputs_name": {
           "type": "object",
+          "required": ["proto", "boxes", "scores", "masks"],
           "properties": {
             "proto":  {"type": "string"},
-            "boxes":  {"type": "array", "items": {"type": "string"}},
-            "scores": {"type": "array", "items": {"type": "string"}},
-            "masks":  {"type": "array", "items": {"type": "string"}}
+            "boxes":  {
+              "type": "array",
+              "items": {"type": "string"},
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "scores": {
+              "type": "array",
+              "items": {"type": "string"},
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "masks":  {
+              "type": "array",
+              "items": {"type": "string"},
+              "minItems": 3,
+              "maxItems": 3
+            }
           }
         }
       }
@@ -450,8 +529,15 @@ Yolov8segParams *init(const std::string config_path, const std::string function_
     rapidjson::FileReadStream stream(fp, config_buffer, sizeof(config_buffer));
     if (common::validate_json_with_schema(stream, json_schema))
     {
+        std::rewind(fp);
+        rapidjson::FileReadStream parse_stream(fp, config_buffer, sizeof(config_buffer));
         rapidjson::Document doc;
-        doc.ParseStream(stream);
+        doc.ParseStream(parse_stream);
+        if (doc.HasParseError() || !doc.IsObject())
+        {
+            fclose(fp);
+            throw std::runtime_error("JSON config file parse failed");
+        }
 
         if (doc.HasMember("iou_threshold"))
         {
@@ -522,6 +608,11 @@ void filter(HailoROIPtr roi, void *params_void_ptr)
     {
         return;
     }
+    if (params->input_shape.size() < 2 || params->input_shape[0] <= 0 || params->input_shape[1] <= 0)
+    {
+        std::cerr << "Warning: invalid input_shape in params; skipping frame" << std::endl;
+        return;
+    }
 
     std::vector<int> network_dims = {params->input_shape[0], params->input_shape[1]};
     auto tensors = roi->get_tensors();
@@ -535,7 +626,7 @@ void filter(HailoROIPtr roi, void *params_void_ptr)
         // Fully robust: ignores channel counts, works for any num_classes and
         // any model naming convention.
         auto tensors_by_name = roi->get_tensors_by_name();
-        scales = collect_scale_tensors_by_name(tensors_by_name, params->outputs_name, network_dims[0]);
+        scales = collect_scale_tensors_by_name(tensors_by_name, params->outputs_name, network_dims[0], params->num_classes);
         proto_tensor_ptr = find_proto_tensor_by_name(tensors_by_name, params->outputs_name.proto);
     }
     else
@@ -576,10 +667,13 @@ void yolov8seg(HailoROIPtr roi, void *params_void_ptr)
 
 void filter_letterbox(HailoROIPtr roi, void *params_void_ptr)
 {
+    auto *params = reinterpret_cast<Yolov8segParams *>(params_void_ptr);
     filter(roi, params_void_ptr);
     HailoBBox roi_bbox = hailo_common::create_flattened_bbox(roi->get_bbox(), roi->get_scaling_bbox());
     auto detections = hailo_common::get_hailo_detections(roi);
-    constexpr float kMinBoxSize = 1.0f / 640.0f;
+    const int input_w = (params->input_shape.size() >= 1) ? params->input_shape[0] : 640;
+    const int input_h = (params->input_shape.size() >= 2) ? params->input_shape[1] : 640;
+    const float kMinBoxSize = 1.0f / static_cast<float>(std::max(input_w, input_h));
     for (auto &detection : detections)
     {
         auto detection_bbox = detection->get_bbox();
