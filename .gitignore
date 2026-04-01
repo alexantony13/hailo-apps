@@ -60,3 +60,4 @@ resources
 gstshark*/
 .vscode/
 docs/superpowers/
+.codex
