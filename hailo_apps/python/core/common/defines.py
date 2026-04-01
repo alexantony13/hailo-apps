@@ -299,11 +299,13 @@ CAMERA_RESOLUTION_MAP: Dict[str, Tuple[int, int]] = {
 RESOURCE_TYPE_MODEL = "model"
 RESOURCE_TYPE_IMAGE = "image"
 RESOURCE_TYPE_VIDEO = "video"
+RESOURCE_TYPE_ONNX = "onnx"
 
 RESOURCE_TYPES = {
     RESOURCE_TYPE_MODEL,
     RESOURCE_TYPE_IMAGE,
     RESOURCE_TYPE_VIDEO,
+    RESOURCE_TYPE_ONNX,
 }
 
 CAMERA_KEYWORDS = ["usb", "rpi"]
@@ -319,6 +321,10 @@ VLM_CHAT_APP = "vlm_chat"
 LLM_CHAT_APP = "llm_chat"
 WHISPER_CHAT_APP = "whisper_chat"
 AGENT_APP = "agent"
+V2A_DEMO_APP = "v2a_demo"
+
+# Standalone app defaults
+WHISPER_H8_APP = "whisper_h8"
 
 # Gen AI model defaults
 VLM_MODEL_NAME_H10 = "Qwen2-VL-2B-Instruct"
