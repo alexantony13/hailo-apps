@@ -223,6 +223,22 @@ shared_library('mobilenet_ssd_postprocess',
 )
 
 ################################################
+# CLASSIFICATION POST SOURCES
+################################################
+
+classification_postprocess_sources = [
+    'classification_postprocess.cpp'
+]
+shared_library('classification_postprocess',
+    classification_postprocess_sources,
+    include_directories : rapidjson_inc,
+    dependencies : postprocess_dep,
+    gnu_symbol_visibility : 'default',
+    install: true,
+    install_dir: '/usr/local/hailo/resources/so',
+)
+
+################################################
 # CLIP SOURCES
 ################################################
 clip_sources = [

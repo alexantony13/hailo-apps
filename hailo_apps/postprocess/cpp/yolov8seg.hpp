@@ -6,12 +6,14 @@
  **/
 #pragma once
 
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "common/labels/coco_eighty.hpp"
 #include "hailo_objects.hpp"
 #include "xtensor/xarray.hpp"
 #include "xtensor/xio.hpp"
-
-#include <string>
-#include <vector>
 
 __BEGIN_DECLS
 
@@ -51,6 +53,8 @@ public:
     std::vector<int> strides;
     int num_classes;                   ///< number of detection classes (default: 80 = COCO)
     Yolov8segOutputsName outputs_name; ///< optional explicit tensor names
+    std::vector<std::string> labels;   ///< optional class labels
+    bool custom_labels;                ///< true when labels came from config
 
     Yolov8segParams()
     {
@@ -59,6 +63,11 @@ public:
         input_shape = {640, 640};
         strides = {32, 16, 8};
         num_classes = 80;
+        custom_labels = false;
+        for (const auto &label : common::coco_eighty)
+        {
+            labels.push_back(label.second);
+        }
     }
 };
 

@@ -4,6 +4,7 @@
 **/
 #include <vector>
 #include <cmath>
+#include <cstdlib>
 #include <unordered_map>
 #include "all_detections_cropper.hpp"
 
@@ -35,6 +36,26 @@ HailoUniqueIDPtr get_tracking_id(HailoDetectionPtr detection)
 bool box_contains_nan(HailoBBox box)
 {
     return (std::isnan(box.xmin()) && std::isnan(box.ymin()) && std::isnan(box.width()) && std::isnan(box.height()));
+}
+
+size_t get_max_instance_classification_crops()
+{
+    constexpr size_t DEFAULT_MAX_CROPS_PER_FRAME = 8;
+    constexpr size_t MAX_REASONABLE_CROPS_PER_FRAME = 32;
+
+    const char *env_value = std::getenv("HAILO_MAX_CLASSIFICATION_CROPS_PER_FRAME");
+    if (env_value == nullptr)
+    {
+        return DEFAULT_MAX_CROPS_PER_FRAME;
+    }
+
+    const int parsed_value = std::atoi(env_value);
+    if (parsed_value <= 0)
+    {
+        return DEFAULT_MAX_CROPS_PER_FRAME;
+    }
+
+    return std::min(static_cast<size_t>(parsed_value), MAX_REASONABLE_CROPS_PER_FRAME);
 }
 
 /**
@@ -113,4 +134,43 @@ std::vector<HailoROIPtr> all_detections(std::shared_ptr<HailoMat> image, HailoRO
     }
 
     return crop_rois;
+}
+
+/**
+ * @brief Returns all valid detections for per-object secondary inference.
+ *
+ * This variant is intended for instance segmentation pipelines where every
+ * detected object should be sent through a classifier. A modest cap keeps the
+ * secondary model from receiving an unbounded number of crops in crowded scenes.
+ */
+std::vector<HailoROIPtr> all_instance_detections(std::shared_ptr<HailoMat> image, HailoROIPtr roi)
+{
+    const size_t max_crops_per_frame = get_max_instance_classification_crops();
+    std::vector<HailoROIPtr> crop_rois;
+    std::vector<HailoDetectionPtr> detections_ptrs = hailo_common::get_hailo_detections(roi);
+
+    for (HailoDetectionPtr &detection : detections_ptrs)
+    {
+        if (!box_contains_nan(detection->get_bbox()))
+        {
+            crop_rois.emplace_back(detection);
+            if (crop_rois.size() >= max_crops_per_frame)
+            {
+                break;
+            }
+        }
+    }
+
+    return crop_rois;
+}
+
+/**
+ * @brief No-tracking alias for instance classification crops.
+ *
+ * Keep this as a separate exported symbol so pipeline code can select a cropper
+ * function that clearly has no tracking dependency when tracking is disabled.
+ */
+std::vector<HailoROIPtr> all_instance_detections_no_tracking(std::shared_ptr<HailoMat> image, HailoROIPtr roi)
+{
+    return all_instance_detections(image, roi);
 }

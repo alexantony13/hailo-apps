@@ -196,6 +196,15 @@ INSTANCE_SEGMENTATION_MODEL_NAME_V8_H10 = "yolov8m_seg"
 INSTANCE_SEGMENTATION_MODEL_PREFIX_V5 = "yolov5"
 INSTANCE_SEGMENTATION_MODEL_PREFIX_V8 = "yolov8"
 
+# Instance segmentation + classification pipeline defaults
+INSTANCE_SEGMENTATION_CLASSIFICATION_APP_TITLE = "Hailo Instance Segmentation Classification App"
+INSTANCE_SEGMENTATION_CLASSIFICATION_PIPELINE = "instance_segmentation_classification"
+CLASSIFICATION_POSTPROCESS_SO_FILENAME = "libclassification_postprocess.so"
+CLASSIFICATION_POSTPROCESS_FUNCTION = "filter"
+CLASSIFICATION_TYPE = "classification"
+INSTANCE_SEGMENTATION_CLASSIFICATION_CROPPER_POSTPROCESS_FUNCTION = "all_instance_detections"
+INSTANCE_SEGMENTATION_CLASSIFICATION_NO_TRACKING_CROPPER_POSTPROCESS_FUNCTION = "all_instance_detections_no_tracking"
+
 # Pose estimation pipeline defaults
 POSE_ESTIMATION_APP_TITLE = "Hailo Pose Estimation App"
 POSE_ESTIMATION_PIPELINE = "pose_estimation"

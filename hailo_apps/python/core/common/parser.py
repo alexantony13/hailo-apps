@@ -396,6 +396,9 @@ def configure_multi_model_hef_path(parser: argparse.ArgumentParser) -> None:
     for action in parser._actions[:]:
         if hasattr(action, 'option_strings') and '--hef-path' in action.option_strings:
             parser._remove_action(action)
+            for group in parser._action_groups:
+                if action in group._group_actions:
+                    group._group_actions.remove(action)
             # Also remove from _option_string_actions
             for opt in action.option_strings:
                 if opt in parser._option_string_actions:

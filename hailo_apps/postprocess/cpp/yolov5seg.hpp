@@ -3,6 +3,11 @@
  * Distributed under the LGPL license (https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt)
  **/
 #pragma once
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "common/labels/coco_eighty.hpp"
 #include "hailo_objects.hpp"
 #include "xtensor/xarray.hpp"
 #include "xtensor/xio.hpp"
@@ -21,6 +26,8 @@ public:
     std::vector<int> strides;
     std::vector<xt::xarray<float>> grids;
     std::vector<xt::xarray<float>> anchor_grids;
+    std::vector<std::string> labels;
+    bool custom_labels;
 
     Yolov5segParams() {
         iou_threshold = 0.6;
@@ -32,6 +39,11 @@ public:
                                             {10, 13, 16, 30, 33, 23} };
         input_shape = {640,640};
         strides = {32, 16, 8};
+        custom_labels = false;
+        for (const auto &label : common::coco_eighty)
+        {
+            labels.push_back(label.second);
+        }
     }
 };
 

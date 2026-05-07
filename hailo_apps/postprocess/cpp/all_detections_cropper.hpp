@@ -10,4 +10,6 @@
 
 __BEGIN_DECLS
 std::vector<HailoROIPtr> all_detections(std::shared_ptr<HailoMat> image, HailoROIPtr roi);
+std::vector<HailoROIPtr> all_instance_detections(std::shared_ptr<HailoMat> image, HailoROIPtr roi);
+std::vector<HailoROIPtr> all_instance_detections_no_tracking(std::shared_ptr<HailoMat> image, HailoROIPtr roi);
 __END_DECLS

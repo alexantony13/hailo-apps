@@ -119,7 +119,7 @@ auto filter_above_threshold(auto &all_scores, auto &is_object_threshold, const f
  * @param masks an xview with 32 coefficients representing a mask per detection
  * @param objects a vecor of HailoDetections, to which the detections will be added
  *  */
-std::vector<HailoDetection> create_hailo_detections(auto &scores_vec, auto &classes_vec, auto &xy, auto wh, auto &masks, const int input_width, const int input_height)
+std::vector<HailoDetection> create_hailo_detections(auto &scores_vec, auto &classes_vec, auto &xy, auto wh, auto &masks, const int input_width, const int input_height, const std::vector<std::string> &labels, bool custom_labels)
 {
     int class_index;
     float confidence, w, h, x, y = 0.0;
@@ -134,7 +134,16 @@ std::vector<HailoDetection> create_hailo_detections(auto &scores_vec, auto &clas
         // x and y represented center of box, so they need to be changed to left bottom corner
         HailoBBox bbox(x - w / 2, y - h / 2, w, h);
         class_index = classes_vec[i];
-        std::string label = common::coco_eighty[class_index];
+        int label_index = custom_labels ? class_index : class_index;
+        std::string label;
+        if (label_index >= 0 && label_index < static_cast<int>(labels.size()))
+        {
+            label = labels[label_index];
+        }
+        else
+        {
+            label = "class_" + std::to_string(class_index);
+        }
         confidence = scores_vec[i];
         // create mask
         xt::xarray<float> mask_coefficients = xt::squeeze(xt::view(masks, xt::keep(i), xt::all()));
@@ -152,7 +161,7 @@ std::vector<HailoDetection> create_hailo_detections(auto &scores_vec, auto &clas
  * @brief Does the decoding and the filtering for the output, and adds the results to the HailoDetections vector
  *
  *  */
-std::vector<HailoDetection> yolov5_decoding(xt::xarray<uint16_t> &output, const int stride, xt::xarray<float> &anchors, xt::xarray<float> &grid, xt::xarray<float> &anchor_grid, const int num_anchors, const float score_threshold, float qp_zp, float qp_scale, const int input_width, const int input_height)
+std::vector<HailoDetection> yolov5_decoding(xt::xarray<uint16_t> &output, const int stride, xt::xarray<float> &anchors, xt::xarray<float> &grid, xt::xarray<float> &anchor_grid, const int num_anchors, const float score_threshold, float qp_zp, float qp_scale, const int input_width, const int input_height, const std::vector<std::string> &labels, bool custom_labels)
 {
     int h = output.shape()[0];
     int w = output.shape()[1];
@@ -192,7 +201,7 @@ std::vector<HailoDetection> yolov5_decoding(xt::xarray<uint16_t> &output, const 
     xt::xarray<float> masks = (filtered_masks - qp_zp) * qp_scale;
 
     // create HailoDetections for the NMS and the mask decoding
-    std::vector<HailoDetection> objects = create_hailo_detections(scores_vec, classes_vec, deq_xy, deq_wh, masks, input_width, input_height);
+    std::vector<HailoDetection> objects = create_hailo_detections(scores_vec, classes_vec, deq_xy, deq_wh, masks, input_width, input_height, labels, custom_labels);
     return objects;
 }
 
@@ -200,26 +209,26 @@ std::vector<HailoDetection> yolov5_decoding(xt::xarray<uint16_t> &output, const 
  * @brief Does dequantize and decoding for each output seperately
  *
  *  */
-std::vector<HailoDetection> post_per_branch(std::string branch_name, const int index, std::map<std::string, HailoTensorPtr> tensors, std::vector<xt::xarray<float>> anchor_list, std::vector<int> stride_list, const float iou_threshold, const float score_threshold, std::vector<xt::xarray<float>> grids, std::vector<xt::xarray<float>> anchor_grids, const int num_anchors, const int input_width, const int input_height)
+std::vector<HailoDetection> post_per_branch(std::string branch_name, const int index, std::map<std::string, HailoTensorPtr> tensors, std::vector<xt::xarray<float>> anchor_list, std::vector<int> stride_list, const float iou_threshold, const float score_threshold, std::vector<xt::xarray<float>> grids, std::vector<xt::xarray<float>> anchor_grids, const int num_anchors, const int input_width, const int input_height, const std::vector<std::string> &labels, bool custom_labels)
 {
     auto output = common::get_xtensor_uint16(tensors[branch_name]);
     float qp_zp = tensors[branch_name]->quant_info().qp_zp;
     float qp_scale = tensors[branch_name]->quant_info().qp_scale;
-    return yolov5_decoding(output, stride_list[index], anchor_list[index], grids[index], anchor_grids[index], num_anchors, score_threshold, qp_zp, qp_scale, input_width, input_height);
+    return yolov5_decoding(output, stride_list[index], anchor_list[index], grids[index], anchor_grids[index], num_anchors, score_threshold, qp_zp, qp_scale, input_width, input_height, labels, custom_labels);
 }
 
 /*
  * @brief Does dequantize and decoding for each output, and then calls nms and decode masks
  *
  *  */
-std::vector<HailoDetection> yolov5seg_post(auto &tensors, auto &anchor_list, auto &stride_list, const float iou_threshold, const float score_threshold, auto &grids, auto &anchor_grids, const int num_anchors, const int input_width, const int input_height, auto &outputs_name)
+std::vector<HailoDetection> yolov5seg_post(auto &tensors, auto &anchor_list, auto &stride_list, const float iou_threshold, const float score_threshold, auto &grids, auto &anchor_grids, const int num_anchors, const int input_width, const int input_height, auto &outputs_name, const std::vector<std::string> &labels, bool custom_labels)
 {
     auto proto_tensor = common::dequantize(common::get_xtensor(tensors[outputs_name[0]]), tensors[outputs_name[0]]->quant_info().qp_scale, tensors[outputs_name[0]]->quant_info().qp_zp);
 
     // run the postprocess for each branch seperately
-    std::future<std::vector<HailoDetection>> t2 = std::async(post_per_branch, outputs_name[1], 2, tensors, anchor_list, stride_list, iou_threshold, score_threshold, grids, anchor_grids, num_anchors, input_width, input_height);
-    std::future<std::vector<HailoDetection>> t1 = std::async(post_per_branch, outputs_name[2], 1, tensors, anchor_list, stride_list, iou_threshold, score_threshold, grids, anchor_grids, num_anchors, input_width, input_height);
-    std::future<std::vector<HailoDetection>> t0 = std::async(post_per_branch, outputs_name[3], 0, tensors, anchor_list, stride_list, iou_threshold, score_threshold, grids, anchor_grids, num_anchors, input_width, input_height);
+    std::future<std::vector<HailoDetection>> t2 = std::async(post_per_branch, outputs_name[1], 2, tensors, anchor_list, stride_list, iou_threshold, score_threshold, grids, anchor_grids, num_anchors, input_width, input_height, labels, custom_labels);
+    std::future<std::vector<HailoDetection>> t1 = std::async(post_per_branch, outputs_name[2], 1, tensors, anchor_list, stride_list, iou_threshold, score_threshold, grids, anchor_grids, num_anchors, input_width, input_height, labels, custom_labels);
+    std::future<std::vector<HailoDetection>> t0 = std::async(post_per_branch, outputs_name[3], 0, tensors, anchor_list, stride_list, iou_threshold, score_threshold, grids, anchor_grids, num_anchors, input_width, input_height, labels, custom_labels);
     std::vector<HailoDetection> d2 = t2.get();
     std::vector<HailoDetection> d1 = t1.get();
     std::vector<HailoDetection> d0 = t0.get();
@@ -287,6 +296,12 @@ Yolov5segParams *init(const std::string config_path, const std::string function_
             "type": "array",
             "items": {
                 "type": "number"
+            }
+            },
+            "labels": {
+            "type": "array",
+            "items": {
+                "type": "string"
             }
             }
         },
@@ -366,6 +381,17 @@ Yolov5segParams *init(const std::string config_path, const std::string function_
             }
             params->strides = strides_vec;
 
+            if (doc_config_json.HasMember("labels"))
+            {
+                auto config_labels = doc_config_json["labels"].GetArray();
+                params->labels.clear();
+                for (uint j = 0; j < config_labels.Size(); j++)
+                {
+                    params->labels.push_back(config_labels[j].GetString());
+                }
+                params->custom_labels = true;
+            }
+
         fclose(fp);
     } }
     std::vector<int> outputs_size = params->outputs_size;
@@ -416,7 +442,7 @@ void filter(HailoROIPtr roi, void *params_void_ptr)
 {
     Yolov5segParams *params = reinterpret_cast<Yolov5segParams *>(params_void_ptr);
     std::map<std::string, HailoTensorPtr> tensors = roi->get_tensors_by_name();
-    std::vector<HailoDetection> detections = yolov5seg_post(tensors, params->anchors, params->strides, params->iou_threshold, params->score_threshold, params->grids, params->anchor_grids, params->num_anchors, params->input_shape[0], params->input_shape[1], params->outputs_name);
+    std::vector<HailoDetection> detections = yolov5seg_post(tensors, params->anchors, params->strides, params->iou_threshold, params->score_threshold, params->grids, params->anchor_grids, params->num_anchors, params->input_shape[0], params->input_shape[1], params->outputs_name, params->labels, params->custom_labels);
     hailo_common::add_detections(roi, detections);
 }
 

@@ -278,7 +278,9 @@ std::vector<HailoDetection> decode_scale(
     const ScaleTensors &scale,
     const xt::xarray<double> &centers,
     const std::vector<int> &network_dims,
-    float score_threshold)
+    float score_threshold,
+    const std::vector<std::string> &labels,
+    bool custom_labels)
 {
     auto boxes_ptr = scale.boxes;
     auto scores_ptr = scale.scores;
@@ -415,11 +417,11 @@ std::vector<HailoDetection> decode_scale(
 
         HailoBBox bbox(xmin, ymin, width, height);
 
-        int hailo_class_index = class_index + 1;
+        int hailo_class_index = custom_labels ? class_index : class_index + 1;
         std::string label;
-        if (hailo_class_index >= 0 && hailo_class_index < static_cast<int>(common::coco_eighty.size()))
+        if (hailo_class_index >= 0 && hailo_class_index < static_cast<int>(labels.size()))
         {
-            label = common::coco_eighty[hailo_class_index];
+            label = labels[hailo_class_index];
         }
         else
         {
@@ -441,7 +443,9 @@ std::vector<HailoDetection> yolov8seg_post(
     const std::vector<ScaleTensors> &scales,
     const std::vector<int> &network_dims,
     float iou_threshold,
-    float score_threshold)
+    float score_threshold,
+    const std::vector<std::string> &labels,
+    bool custom_labels)
 {
     if (scales.empty())
     {
@@ -459,7 +463,7 @@ std::vector<HailoDetection> yolov8seg_post(
     std::vector<HailoDetection> all_detections;
     for (size_t i = 0; i < scales.size(); i++)
     {
-        auto detections = decode_scale(scales[i], centers[i], network_dims, score_threshold);
+        auto detections = decode_scale(scales[i], centers[i], network_dims, score_threshold, labels, custom_labels);
         all_detections.insert(all_detections.end(), detections.begin(), detections.end());
     }
 
@@ -487,6 +491,10 @@ Yolov8segParams *init(const std::string config_path, const std::string function_
         "iou_threshold":   {"type": "number", "minimum": 0, "maximum": 1},
         "score_threshold": {"type": "number", "minimum": 0, "maximum": 1},
         "num_classes":     {"type": "integer", "minimum": 1},
+        "labels":          {
+          "type": "array",
+          "items": {"type": "string"}
+        },
         "input_shape":     {
           "type": "array",
           "items": {"type": "integer", "minimum": 1},
@@ -550,6 +558,16 @@ Yolov8segParams *init(const std::string config_path, const std::string function_
         if (doc.HasMember("num_classes"))
         {
             params->num_classes = doc["num_classes"].GetInt();
+        }
+        if (doc.HasMember("labels"))
+        {
+            params->labels.clear();
+            const auto config_labels = doc["labels"].GetArray();
+            for (uint j = 0; j < config_labels.Size(); j++)
+            {
+                params->labels.push_back(config_labels[j].GetString());
+            }
+            params->custom_labels = true;
         }
         if (doc.HasMember("input_shape"))
         {
@@ -650,7 +668,7 @@ void filter(HailoROIPtr roi, void *params_void_ptr)
         return;
     }
 
-    auto detections = yolov8seg_post(scales, network_dims, params->iou_threshold, params->score_threshold);
+    auto detections = yolov8seg_post(scales, network_dims, params->iou_threshold, params->score_threshold, params->labels, params->custom_labels);
     auto proto_tensor = common::dequantize(
         common::get_xtensor(proto_tensor_ptr),
         proto_tensor_ptr->quant_info().qp_scale,
